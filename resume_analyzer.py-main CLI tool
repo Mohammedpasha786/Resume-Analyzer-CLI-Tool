@@ -1,0 +1,291 @@
+#!/usr/bin/env python3
+"""
+Resume Analyzer CLI Tool
+Analyzes PDF resumes for skill mentions and provides improvement suggestions.
+"""
+
+import argparse
+import sys
+import os
+from pathlib import Path
+import re
+from collections import Counter
+from typing import Dict, List, Tuple, Set
+import json
+
+try:
+    import fitz  # PyMuPDF
+except ImportError:
+    print("Error: PyMuPDF not installed. Run: pip install PyMuPDF")
+    sys.exit(1)
+
+try:
+    from colorama import init, Fore, Style
+    init()  # Initialize colorama for cross-platform colored output
+    COLORS_AVAILABLE = True
+except ImportError:
+    COLORS_AVAILABLE = False
+    Fore = Style = type('', (), {'__getattr__': lambda self, name: ''})()
+
+
+class ResumeAnalyzer:
+    """Main class for analyzing PDF resumes."""
+    
+    def __init__(self):
+        """Initialize the analyzer with predefined skill categories."""
+        self.skill_categories = {
+            'Programming Languages': [
+                'python', 'java', 'javascript', 'c++', 'c#', 'ruby', 'go', 'rust',
+                'php', 'swift', 'kotlin', 'scala', 'r', 'matlab', 'perl', 'shell',
+                'bash', 'powershell', 'typescript', 'dart', 'elixir', 'haskell'
+            ],
+            'Web Technologies': [
+                'html', 'css', 'react', 'angular', 'vue', 'node.js', 'express',
+                'django', 'flask', 'fastapi', 'spring', 'laravel', 'rails',
+                'jquery', 'bootstrap', 'sass', 'webpack', 'npm', 'yarn'
+            ],
+            'Databases': [
+                'sql', 'mysql', 'postgresql', 'mongodb', 'sqlite', 'redis',
+                'elasticsearch', 'cassandra', 'dynamodb', 'oracle', 'mssql',
+                'nosql', 'firebase', 'neo4j'
+            ],
+            'Cloud & DevOps': [
+                'aws', 'azure', 'gcp', 'docker', 'kubernetes', 'jenkins',
+                'gitlab', 'github', 'terraform', 'ansible', 'chef', 'puppet',
+                'circleci', 'travis', 'heroku', 'nginx', 'apache'
+            ],
+            'Data Science & ML': [
+                'machine learning', 'deep learning', 'tensorflow', 'pytorch',
+                'scikit-learn', 'pandas', 'numpy', 'matplotlib', 'seaborn',
+                'jupyter', 'spark', 'hadoop', 'kafka', 'airflow', 'mlops',
+                'computer vision', 'nlp', 'statistics'
+            ],
+            'Tools & Frameworks': [
+                'git', 'linux', 'unix', 'agile', 'scrum', 'jira', 'confluence',
+                'slack', 'teams', 'vs code', 'intellij', 'eclipse', 'vim',
+                'postman', 'swagger', 'rest api', 'graphql', 'microservices'
+            ]
+        }
+        
+        # Flatten all skills for easy searching
+        self.all_skills = {}
+        for category, skills in self.skill_categories.items():
+            for skill in skills:
+                self.all_skills[skill.lower()] = category
+    
+    def extract_text_from_pdf(self, pdf_path: str) -> str:
+        """Extract text from PDF using PyMuPDF."""
+        try:
+            doc = fitz.open(pdf_path)
+            text = ""
+            
+            for page_num in range(doc.page_count):
+                page = doc[page_num]
+                text += page.get_text()
+            
+            doc.close()
+            return text
+        
+        except Exception as e:
+            print(f"{Fore.RED}Error extracting text from PDF: {e}{Style.RESET_ALL}")
+            return ""
+    
+    def clean_text(self, text: str) -> str:
+        """Clean and normalize extracted text."""
+        # Remove extra whitespace and normalize
+        text = re.sub(r'\s+', ' ', text)
+        # Remove special characters but keep alphanumeric and common punctuation
+        text = re.sub(r'[^\w\s\-\.\+\#]', ' ', text)
+        return text.lower().strip()
+    
+    def find_skills(self, text: str) -> Dict[str, Dict[str, int]]:
+        """Find and count skill mentions in the text."""
+        skill_counts = {category: {} for category in self.skill_categories.keys()}
+        text_lower = text.lower()
+        
+        for skill, category in self.all_skills.items():
+            # Use word boundaries for exact matches, but be flexible with punctuation
+            pattern = r'\b' + re.escape(skill) + r'\b'
+            matches = len(re.findall(pattern, text_lower))
+            
+            if matches > 0:
+                skill_counts[category][skill] = matches
+        
+        return skill_counts
+    
+    def calculate_skill_score(self, skill_counts: Dict[str, Dict[str, int]]) -> int:
+        """Calculate overall skill diversity score."""
+        total_categories = len(self.skill_categories)
+        categories_with_skills = sum(1 for skills in skill_counts.values() if skills)
+        total_unique_skills = sum(len(skills) for skills in skill_counts.values())
+        
+        # Score based on category coverage and total skills
+        coverage_score = (categories_with_skills / total_categories) * 50
+        skill_count_score = min(total_unique_skills * 2, 50)
+        
+        return int(coverage_score + skill_count_score)
+    
+    def suggest_improvements(self, skill_counts: Dict[str, Dict[str, int]]) -> List[str]:
+        """Generate improvement suggestions based on missing skills."""
+        suggestions = []
+        
+        # Check for missing categories
+        empty_categories = [cat for cat, skills in skill_counts.items() if not skills]
+        
+        if empty_categories:
+            suggestions.append(f"Consider adding skills from these categories: {', '.join(empty_categories)}")
+        
+        # Suggest popular skills from categories with low representation
+        low_rep_categories = [cat for cat, skills in skill_counts.items() 
+                             if len(skills) <= 2 and skills]
+        
+        popular_skills = {
+            'Programming Languages': ['Python', 'JavaScript', 'Java'],
+            'Web Technologies': ['React', 'Node.js', 'HTML/CSS'],
+            'Databases': ['SQL', 'PostgreSQL', 'MongoDB'],
+            'Cloud & DevOps': ['AWS', 'Docker', 'Git'],
+            'Data Science & ML': ['Machine Learning', 'Pandas', 'TensorFlow'],
+            'Tools & Frameworks': ['Git', 'Linux', 'REST API']
+        }
+        
+        for category in low_rep_categories:
+            missing_popular = [skill for skill in popular_skills.get(category, []) 
+                              if skill.lower() not in skill_counts[category]]
+            if missing_popular:
+                suggestions.append(f"Consider adding popular {category} skills: {', '.join(missing_popular[:3])}")
+        
+        # General suggestions
+        total_skills = sum(len(skills) for skills in skill_counts.values())
+        if total_skills < 10:
+            suggestions.append("Try to include more technical skills to demonstrate breadth of knowledge")
+        
+        if not skill_counts.get('Cloud & DevOps'):
+            suggestions.append("Cloud skills (AWS, Azure, Docker) are highly valued in today's market")
+        
+        return suggestions[:5]  # Limit to top 5 suggestions
+    
+    def generate_report(self, pdf_path: str, skill_counts: Dict[str, Dict[str, int]], 
+                       score: int, suggestions: List[str]) -> str:
+        """Generate a formatted analysis report."""
+        report = []
+        
+        # Header
+        report.append("=" * 60)
+        report.append(f"{Fore.CYAN}RESUME ANALYSIS REPORT{Style.RESET_ALL}")
+        report.append("=" * 60)
+        report.append(f"File: {os.path.basename(pdf_path)}")
+        report.append(f"Overall Skill Score: {Fore.GREEN if score >= 70 else Fore.YELLOW if score >= 40 else Fore.RED}{score}/100{Style.RESET_ALL}")
+        report.append("")
+        
+        # Skills by category
+        report.append(f"{Fore.CYAN}SKILLS FOUND:{Style.RESET_ALL}")
+        report.append("-" * 40)
+        
+        total_skills = 0
+        for category, skills in skill_counts.items():
+            if skills:
+                report.append(f"\n{Fore.YELLOW}{category}:{Style.RESET_ALL}")
+                for skill, count in sorted(skills.items(), key=lambda x: x[1], reverse=True):
+                    report.append(f"  • {skill.title()} ({count} mention{'s' if count > 1 else ''})")
+                    total_skills += 1
+            else:
+                report.append(f"\n{Fore.RED}{category}: No skills found{Style.RESET_ALL}")
+        
+        report.append(f"\nTotal unique skills found: {Fore.GREEN}{total_skills}{Style.RESET_ALL}")
+        
+        # Suggestions
+        if suggestions:
+            report.append(f"\n{Fore.CYAN}IMPROVEMENT SUGGESTIONS:{Style.RESET_ALL}")
+            report.append("-" * 40)
+            for i, suggestion in enumerate(suggestions, 1):
+                report.append(f"{i}. {suggestion}")
+        
+        report.append("\n" + "=" * 60)
+        
+        return "\n".join(report)
+    
+    def analyze_resume(self, pdf_path: str, output_format: str = 'console') -> Dict:
+        """Main method to analyze a resume."""
+        if not os.path.exists(pdf_path):
+            print(f"{Fore.RED}Error: File {pdf_path} not found{Style.RESET_ALL}")
+            return {}
+        
+        print(f"{Fore.BLUE}Analyzing resume: {pdf_path}{Style.RESET_ALL}")
+        
+        # Extract text
+        raw_text = self.extract_text_from_pdf(pdf_path)
+        if not raw_text:
+            print(f"{Fore.RED}Error: Could not extract text from PDF{Style.RESET_ALL}")
+            return {}
+        
+        # Process text
+        clean_text = self.clean_text(raw_text)
+        
+        # Find skills
+        skill_counts = self.find_skills(clean_text)
+        
+        # Calculate score
+        score = self.calculate_skill_score(skill_counts)
+        
+        # Generate suggestions
+        suggestions = self.suggest_improvements(skill_counts)
+        
+        # Create results dictionary
+        results = {
+            'file_path': pdf_path,
+            'skill_counts': skill_counts,
+            'score': score,
+            'suggestions': suggestions,
+            'total_skills': sum(len(skills) for skills in skill_counts.values())
+        }
+        
+        # Output results
+        if output_format == 'console':
+            report = self.generate_report(pdf_path, skill_counts, score, suggestions)
+            print(report)
+        elif output_format == 'json':
+            print(json.dumps(results, indent=2))
+        
+        return results
+
+
+def main():
+    """Main CLI entry point."""
+    parser = argparse.ArgumentParser(
+        description="Analyze PDF resumes for skill mentions and provide improvement suggestions",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  %(prog)s resume.pdf
+  %(prog)s resume.pdf --output json
+  %(prog)s resume.pdf --save-json results.json
+        """
+    )
+    
+    parser.add_argument('pdf_file', help='Path to the PDF resume file')
+    parser.add_argument('--output', choices=['console', 'json'], default='console',
+                       help='Output format (default: console)')
+    parser.add_argument('--save-json', metavar='FILE',
+                       help='Save results to JSON file')
+    parser.add_argument('--version', action='version', version='Resume Analyzer 1.0')
+    
+    args = parser.parse_args()
+    
+    # Initialize analyzer
+    analyzer = ResumeAnalyzer()
+    
+    # Analyze resume
+    results = analyzer.analyze_resume(args.pdf_file, args.output)
+    
+    # Save to JSON if requested
+    if args.save_json and results:
+        try:
+            with open(args.save_json, 'w') as f:
+                json.dump(results, f, indent=2)
+            print(f"\n{Fore.GREEN}Results saved to {args.save_json}{Style.RESET_ALL}")
+        except Exception as e:
+            print(f"{Fore.RED}Error saving JSON: {e}{Style.RESET_ALL}")
+
+
+if __name__ == "__main__":
+    main()
